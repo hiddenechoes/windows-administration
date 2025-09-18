@@ -95,13 +95,23 @@ function Test-MzExecutable {
     try {
         $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
         try {
-            $buffer = New-Object byte[] 2
-            $bytesRead = $stream.Read($buffer, 0, 2)
-            if ($bytesRead -ne 2) {
+            $buffer = New-Object byte[] 8
+            $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+            if ($bytesRead -lt 2) {
                 return $false
             }
 
-            return ($buffer[0] -eq 0x4D -and $buffer[1] -eq 0x5A)
+            # PE/Executable files begin with the 'MZ' header
+            if ($buffer[0] -eq 0x4D -and $buffer[1] -eq 0x5A) {
+                return $true
+            }
+
+            # MSI packages are Compound File Binary Format and start with D0 CF 11 E0
+            if ($bytesRead -ge 4 -and $buffer[0] -eq 0xD0 -and $buffer[1] -eq 0xCF -and $buffer[2] -eq 0x11 -and $buffer[3] -eq 0xE0) {
+                return $true
+            }
+
+            return $false
         } finally {
             $stream.Dispose()
         }
