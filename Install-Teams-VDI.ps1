@@ -3,16 +3,16 @@
 Installs the new Microsoft Teams client optimized for Azure Virtual Desktop (AVD).
 
 .DESCRIPTION
-Downloads the latest Microsoft Teams MSIX package, removes legacy Teams deployments, installs the Remote Desktop WebRTC Redirector service, and installs the new Teams client with VDI optimizations for Azure Virtual Desktop hosts. The script provisions the package for future profiles, registers it for the current session, and configures required registry keys.
+Downloads the Microsoft Teams bootstrapper, removes legacy Teams deployments, installs the Remote Desktop WebRTC Redirector service, and installs the new Teams client with VDI optimizations for Azure Virtual Desktop hosts. The script provisions Teams using the bootstrapper for future profiles (when requested), registers it for the current session, and configures required registry keys.
 
-.PARAMETER TeamsMsixUrl
-Location of the Microsoft Teams MSIX (x64) package. Defaults to the evergreen link supplied by Microsoft.
+.PARAMETER TeamsBootstrapperUrl
+Location of the Microsoft Teams bootstrapper executable (x64). Defaults to the evergreen link supplied by Microsoft.
 
 .PARAMETER WebRtcInstallerUrl
 Download location of the Remote Desktop WebRTC Redirector Service (MSI). Defaults to the Microsoft evergreen link.
 
 .PARAMETER DownloadDirectory
-Local directory used for caching the Teams installer and WebRTC Redirector MSI. Defaults to %ProgramData%\Microsoft\TeamsVDI.
+Local directory used for caching the Teams bootstrapper and WebRTC Redirector MSI. Defaults to %ProgramData%\Microsoft\TeamsVDI.
 
 .PARAMETER SkipRemoveClassicTeams
 Skips removal of the Teams Machine-Wide Installer and classic Teams per-user folders.
@@ -21,14 +21,14 @@ Skips removal of the Teams Machine-Wide Installer and classic Teams per-user fol
 Skips installation of the Remote Desktop WebRTC Redirector service.
 
 .PARAMETER NoProvisioning
-Installs Teams for the current session only and skips provisioning for future user profiles.
+Installs Teams for the current session only (bootstrapper without provisioning switch).
 
 .PARAMETER Force
 Forces re-download of cached installers even if they already exist locally.
 
 .EXAMPLE
 PS C:\> .\Install-Teams-VDI.ps1
-Installs the latest Teams client, provisions it for all users on the host, and ensures the WebRTC Redirector Service is present.
+Installs the latest Teams client, provisions it for all users on the host using the bootstrapper, and ensures the WebRTC Redirector Service is present.
 
 .NOTES
 Requires administrative privileges and network access to the Teams and Azure Virtual Desktop content delivery networks.
@@ -37,7 +37,7 @@ Requires administrative privileges and network access to the Teams and Azure Vir
 param(
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$TeamsMsixUrl = 'https://go.microsoft.com/fwlink/?linkid=2249065',
+    [string]$TeamsBootstrapperUrl = 'https://go.microsoft.com/fwlink/?linkid=2248151',
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
@@ -207,16 +207,23 @@ function Remove-ExistingNewTeams {
 
 function Install-NewTeams {
     param(
-        [Parameter(Mandatory)][string]$PackagePath,
+        [Parameter(Mandatory)][string]$BootstrapperPath,
         [switch]$Provision
     )
 
-    Write-Step "Installing Microsoft Teams from $PackagePath"
-    Add-AppxPackage -Path $PackagePath -ForceApplicationShutdown -ForceUpdateFromAnyVersion
+    if (-not (Test-Path -Path $BootstrapperPath)) {
+        throw "Teams bootstrapper not found at $BootstrapperPath"
+    }
 
+    $args = @()
     if ($Provision) {
-        Write-Step 'Provisioning Microsoft Teams for future user profiles'
-        Add-AppxProvisionedPackage -Online -PackagePath $PackagePath -SkipLicense | Out-Null
+        $args += '-p'
+    }
+
+    Write-Step "Installing Microsoft Teams via Teams bootstrapper"
+    $process = Start-Process -FilePath $BootstrapperPath -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
+    if ($process.ExitCode -ne 0) {
+        throw "Teams bootstrapper returned exit code $($process.ExitCode)"
     }
 }
 
@@ -304,8 +311,8 @@ if (-not $SkipWebRtcRedirectorInstall) {
     Write-Step 'Skipping WebRTC Redirector Service installation as requested'
 }
 
-$packagePath = Get-DownloadTarget -Url $TeamsMsixUrl -Directory $DownloadDirectory -FallbackFileName 'MSTeams-x64.msix'
-Download-File -Url $TeamsMsixUrl -Destination $packagePath -ForceDownload:$Force
+$bootstrapperPath = Get-DownloadTarget -Url $TeamsBootstrapperUrl -Directory $DownloadDirectory -FallbackFileName 'TeamsBootstrapper.exe'
+Download-File -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force
 
 if (-not $SkipRemoveClassicTeams) {
     Remove-ClassicTeams
@@ -315,7 +322,7 @@ if (-not $SkipRemoveClassicTeams) {
 
 Remove-ExistingNewTeams
 
-Install-NewTeams -PackagePath $packagePath -Provision:(-not $NoProvisioning)
+Install-NewTeams -BootstrapperPath $bootstrapperPath -Provision:(-not $NoProvisioning)
 Configure-TeamsVDI
 
 Write-Step 'Microsoft Teams (new) installation and VDI configuration complete'
