@@ -85,8 +85,11 @@ function Write-WarningMessage {
     Write-Warning $Message
 }
 
-function Test-MzExecutable {
-    param([Parameter(Mandatory)][string]$Path)
+function Test-BinarySignature {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateSet('PE','MSI','AnyBinary')][string]$ExpectedType = 'AnyBinary'
+    )
 
     if (-not (Test-Path -Path $Path)) {
         return $false
@@ -97,21 +100,18 @@ function Test-MzExecutable {
         try {
             $buffer = New-Object byte[] 8
             $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
-            if ($bytesRead -lt 2) {
+            if ($bytesRead -lt 4) {
                 return $false
             }
 
-            # PE/Executable files begin with the 'MZ' header
-            if ($buffer[0] -eq 0x4D -and $buffer[1] -eq 0x5A) {
-                return $true
-            }
+            $isPe = ($buffer[0] -eq 0x4D -and $buffer[1] -eq 0x5A)
+            $isMsi = ($buffer[0] -eq 0xD0 -and $buffer[1] -eq 0xCF -and $buffer[2] -eq 0x11 -and $buffer[3] -eq 0xE0)
 
-            # MSI packages are Compound File Binary Format and start with D0 CF 11 E0
-            if ($bytesRead -ge 4 -and $buffer[0] -eq 0xD0 -and $buffer[1] -eq 0xCF -and $buffer[2] -eq 0x11 -and $buffer[3] -eq 0xE0) {
-                return $true
+            switch ($ExpectedType) {
+                'PE' { return $isPe }
+                'MSI' { return $isMsi }
+                'AnyBinary' { return ($isPe -or $isMsi) }
             }
-
-            return $false
         } finally {
             $stream.Dispose()
         }
@@ -149,12 +149,12 @@ function Download-File {
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$Destination,
         [switch]$ForceDownload,
-        [switch]$EnsureExecutable
+        [ValidateSet('None','PE','MSI','AnyBinary')][string]$EnsureBinary = 'None'
     )
 
     if (Test-Path -Path $Destination) {
         if (-not $ForceDownload) {
-            if ($EnsureExecutable -and -not (Test-MzExecutable -Path $Destination)) {
+            if ($EnsureBinary -ne 'None' -and -not (Test-BinarySignature -Path $Destination -ExpectedType $EnsureBinary)) {
                 Write-Step "Cached package at $Destination is invalid. Re-downloading."
                 Remove-Item -Path $Destination -ErrorAction SilentlyContinue
             } else {
@@ -168,11 +168,26 @@ function Download-File {
 
     Write-Step "Downloading from $Url"
     $headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; TeamsVDI Installer)' }
-    Invoke-WebRequest -Uri $Url -UseBasicParsing -Headers $headers -OutFile $Destination
+    $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -Headers $headers -OutFile $Destination -PassThru
 
-    if ($EnsureExecutable -and -not (Test-MzExecutable -Path $Destination)) {
+    if ($EnsureBinary -ne 'None' -and -not (Test-BinarySignature -Path $Destination -ExpectedType $EnsureBinary)) {
+        $contentType = $response.Headers['Content-Type']
+        $length = if (Test-Path -Path $Destination) { (Get-Item $Destination).Length } else { 0 }
+        $bytes = @()
+        if (Test-Path -Path $Destination) {
+            $fs = [System.IO.File]::Open($Destination, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            try {
+                $buffer = New-Object byte[] 8
+                $read = $fs.Read($buffer, 0, $buffer.Length)
+                if ($read -gt 0) { $bytes = $buffer[0..($read-1)] }
+            } finally {
+                $fs.Dispose()
+            }
+        }
         Remove-Item -Path $Destination -ErrorAction SilentlyContinue
-        throw "Downloaded file from $Url is not a valid Windows executable."
+        $byteString = ($bytes | ForEach-Object { $_.ToString('X2') }) -join ' '
+        $detail = "content-type=$contentType; length=$length; first-bytes=$byteString"
+        throw "Downloaded file from $Url is not a valid $EnsureBinary payload ($detail)."
     }
 }
 
@@ -319,7 +334,7 @@ function Ensure-WebRtcRedirector {
 
     Write-Step 'WebRTC Redirector Service not detected. Installing.'
     $installerPath = Get-DownloadTarget -Url $InstallerUrl -Directory $CacheDirectory -FallbackFileName 'MsRdcWebRTCSvc.msi'
-    Download-File -Url $InstallerUrl -Destination $installerPath -ForceDownload:$ForceDownload -EnsureExecutable
+    Download-File -Url $InstallerUrl -Destination $installerPath -ForceDownload:$ForceDownload -EnsureBinary MSI
     Install-WebRtcRedirector -InstallerPath $installerPath
 
     $service = Get-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
@@ -373,7 +388,7 @@ if (-not $SkipWebRtcRedirectorInstall) {
 }
 
 $bootstrapperPath = Get-DownloadTarget -Url $TeamsBootstrapperUrl -Directory $DownloadDirectory -FallbackFileName 'TeamsBootstrapper.exe'
-Download-File -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force -EnsureExecutable
+Download-File -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force -EnsureBinary PE
 
 if (-not $SkipRemoveClassicTeams) {
     Remove-ClassicTeams
