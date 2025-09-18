@@ -1,37 +1,25 @@
 <#
 .SYNOPSIS
-Installs the new Microsoft Teams client optimized for Azure Virtual Desktop (AVD).
+Installs Microsoft Teams (new) and the Azure Virtual Desktop WebRTC Redirector on a fresh Windows 11 session host image.
 
 .DESCRIPTION
-Downloads the Microsoft Teams bootstrapper, removes legacy Teams deployments, installs the Remote Desktop WebRTC Redirector service, and installs the new Teams client with VDI optimizations for Azure Virtual Desktop hosts. The script provisions Teams using the bootstrapper for future profiles (when requested), registers it for the current session, and configures required registry keys.
+Downloads the Teams bootstrapper and the Remote Desktop WebRTC Redirector service, installs both, and applies the minimal registry configuration required for Teams media redirection on Azure Virtual Desktop.
 
 .PARAMETER TeamsBootstrapperUrl
-Location of the Microsoft Teams bootstrapper executable (x64). Defaults to the evergreen link supplied by Microsoft.
+Evergreen download link for the Teams bootstrapper executable.
 
 .PARAMETER WebRtcInstallerUrl
-Download location of the Remote Desktop WebRTC Redirector Service (MSI). Defaults to the Microsoft evergreen link.
+Evergreen download link for the Remote Desktop WebRTC Redirector MSI.
 
 .PARAMETER DownloadDirectory
-Local directory used for caching the Teams bootstrapper and WebRTC Redirector MSI. Defaults to %ProgramData%\Microsoft\TeamsVDI.
-
-.PARAMETER SkipRemoveClassicTeams
-Skips removal of the Teams Machine-Wide Installer and classic Teams per-user folders.
-
-.PARAMETER SkipWebRtcRedirectorInstall
-Skips installation of the Remote Desktop WebRTC Redirector service.
-
-.PARAMETER NoProvisioning
-Installs Teams for the current session only (bootstrapper without provisioning switch).
+Local cache folder for downloaded installers. Defaults to %ProgramData%\Microsoft\TeamsVDI.
 
 .PARAMETER Force
-Forces re-download of cached installers even if they already exist locally.
+Forces re-download of the Teams bootstrapper and WebRTC Redirector installers.
 
 .EXAMPLE
 PS C:\> .\Install-Teams-VDI.ps1
-Installs the latest Teams client, provisions it for all users on the host using the bootstrapper, and ensures the WebRTC Redirector Service is present.
-
-.NOTES
-Requires administrative privileges and network access to the Teams and Azure Virtual Desktop content delivery networks.
+Downloads Teams and the WebRTC Redirector, installs both, and configures Teams for Azure Virtual Desktop.
 #>
 [CmdletBinding()]
 param(
@@ -48,31 +36,20 @@ param(
     [string]$DownloadDirectory = "$env:ProgramData\Microsoft\TeamsVDI",
 
     [Parameter()]
-    [switch]$SkipRemoveClassicTeams,
-
-    [Parameter()]
-    [switch]$SkipWebRtcRedirectorInstall,
-
-    [Parameter()]
-    [switch]$NoProvisioning,
-
-    [Parameter()]
     [switch]$Force
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
+    throw 'Run this script from an elevated PowerShell session.'
+}
+
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 } catch {
-    # Ignore on platforms where ServicePointManager is not available
-}
-
-function Test-IsAdministrator {
-    $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+    # TLS selection not available on down-level PowerShell - ignore.
 }
 
 function Write-Step {
@@ -80,50 +57,10 @@ function Write-Step {
     Write-Host "[+] $Message" -ForegroundColor Cyan
 }
 
-function Write-WarningMessage {
-    param([Parameter(Mandatory)][string]$Message)
-    Write-Warning $Message
-}
-
-function Test-BinarySignature {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [ValidateSet('PE','MSI','AnyBinary')][string]$ExpectedType = 'AnyBinary'
-    )
-
-    if (-not (Test-Path -Path $Path)) {
-        return $false
-    }
-
-    try {
-        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-        try {
-            $buffer = New-Object byte[] 8
-            $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
-            if ($bytesRead -lt 4) {
-                return $false
-            }
-
-            $isPe = ($buffer[0] -eq 0x4D -and $buffer[1] -eq 0x5A)
-            $isMsi = ($buffer[0] -eq 0xD0 -and $buffer[1] -eq 0xCF -and $buffer[2] -eq 0x11 -and $buffer[3] -eq 0xE0)
-
-            switch ($ExpectedType) {
-                'PE' { return $isPe }
-                'MSI' { return $isMsi }
-                'AnyBinary' { return ($isPe -or $isMsi) }
-            }
-        } finally {
-            $stream.Dispose()
-        }
-    } catch {
-        return $false
-    }
-}
-
 function Ensure-Directory {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -Path $Path)) {
-        Write-Step "Creating directory: $Path"
+        Write-Step "Creating cache directory: $Path"
         New-Item -Path $Path -ItemType Directory -Force | Out-Null
     }
 }
@@ -132,273 +69,92 @@ function Get-DownloadTarget {
     param(
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$Directory,
-        [Parameter()][string]$FallbackFileName = 'download.bin'
+        [Parameter(Mandatory)][string]$FallbackName
     )
 
     $uri = [System.Uri]::new($Url)
     $fileName = [System.IO.Path]::GetFileName($uri.AbsolutePath)
     if ([string]::IsNullOrWhiteSpace($fileName) -or ($fileName -notmatch '\.')) {
-        $fileName = $FallbackFileName
+        $fileName = $FallbackName
     }
 
     return [System.IO.Path]::Combine($Directory, $fileName)
 }
 
-function Download-File {
+function Download-Installer {
     param(
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$Destination,
-        [switch]$ForceDownload,
-        [ValidateSet('None','PE','MSI','AnyBinary')][string]$EnsureBinary = 'None'
+        [switch]$ForceDownload
     )
 
-    if (Test-Path -Path $Destination) {
-        if (-not $ForceDownload) {
-            if ($EnsureBinary -ne 'None' -and -not (Test-BinarySignature -Path $Destination -ExpectedType $EnsureBinary)) {
-                Write-Step "Cached package at $Destination is invalid. Re-downloading."
-                Remove-Item -Path $Destination -ErrorAction SilentlyContinue
-            } else {
-                Write-Step "Using cached package: $Destination"
-                return
-            }
-        } else {
-            Remove-Item -Path $Destination -ErrorAction SilentlyContinue
-        }
+    if ((Test-Path -Path $Destination) -and -not $ForceDownload) {
+        Write-Step "Using cached copy: $Destination"
+        return $Destination
     }
 
-    Write-Step "Downloading from $Url"
+    Write-Step "Downloading from: $Url"
     $headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; TeamsVDI Installer)' }
-    $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -Headers $headers -OutFile $Destination -PassThru
-
-    if ($EnsureBinary -ne 'None' -and -not (Test-BinarySignature -Path $Destination -ExpectedType $EnsureBinary)) {
-        $contentType = $response.Headers['Content-Type']
-        $length = if (Test-Path -Path $Destination) { (Get-Item $Destination).Length } else { 0 }
-        $bytes = @()
-        if (Test-Path -Path $Destination) {
-            $fs = [System.IO.File]::Open($Destination, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-            try {
-                $buffer = New-Object byte[] 8
-                $read = $fs.Read($buffer, 0, $buffer.Length)
-                if ($read -gt 0) { $bytes = $buffer[0..($read-1)] }
-            } finally {
-                $fs.Dispose()
-            }
-        }
-        Remove-Item -Path $Destination -ErrorAction SilentlyContinue
-        $byteString = ($bytes | ForEach-Object { $_.ToString('X2') }) -join ' '
-        $detail = "content-type=$contentType; length=$length; first-bytes=$byteString"
-        throw "Downloaded file from $Url is not a valid $EnsureBinary payload ($detail)."
-    }
+    Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -OutFile $Destination
+    return $Destination
 }
 
-function Remove-ClassicTeams {
-    Write-Step 'Checking for legacy Teams Machine-Wide Installer'
+function Install-TeamsBootstrapper {
+    param([Parameter(Mandatory)][string]$BootstrapperPath)
 
-    $registryRoots = @(
-        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
-        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
-    )
-
-    $foundLegacy = $false
-
-    foreach ($root in $registryRoots) {
-        try {
-            $entries = Get-ChildItem -Path $root -ErrorAction Stop | ForEach-Object { Get-ItemProperty -Path $_.PSPath }
-        } catch {
-            continue
-        }
-
-        foreach ($entry in $entries) {
-            $displayNameProperty = $entry.PSObject.Properties['DisplayName']
-            if ($null -eq $displayNameProperty -or $displayNameProperty.Value -ne 'Teams Machine-Wide Installer') {
-                continue
-            }
-            $foundLegacy = $true
-            $uninstallCmd = $entry.UninstallString
-            if (-not $uninstallCmd) {
-                continue
-            }
-
-            Write-Step 'Removing Teams Machine-Wide Installer'
-            if ($uninstallCmd -match '\{[0-9A-F-]{36}\}') {
-                $productCode = $matches[0]
-                Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/x', $productCode, '/qn', '/norestart') -Wait -WindowStyle Hidden | Out-Null
-            } else {
-                $cmdArguments = @('/d', '/c', $uninstallCmd)
-                if ($uninstallCmd -notmatch '/S') {
-                    $cmdArguments[-1] = "$uninstallCmd /S"
-                }
-
-                Start-Process -FilePath 'cmd.exe' -ArgumentList $cmdArguments -Wait -WindowStyle Hidden | Out-Null
-            }
-        }
-    }
-
-    if (-not $foundLegacy) {
-        Write-Step 'Teams Machine-Wide Installer not found'
-    }
-
-    Write-Step 'Removing cached per-user classic Teams folders'
-    $systemRoot = Split-Path -Path $env:ProgramData -Parent
-    $userProfileRoot = Join-Path -Path $systemRoot -ChildPath 'Users'
-    if (Test-Path -Path $userProfileRoot) {
-        $teamsRelativePath = [System.IO.Path]::Combine('AppData', 'Local', 'Microsoft', 'Teams')
-        Get-ChildItem -Path $userProfileRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-            $appDataPath = Join-Path -Path $_.FullName -ChildPath $teamsRelativePath
-            if (Test-Path -Path $appDataPath) {
-                try {
-                    Remove-Item -Path $appDataPath -Recurse -Force -ErrorAction Stop
-                    Write-Step "Removed $appDataPath"
-                } catch {
-                    Write-WarningMessage "Failed to clean $appDataPath. $_"
-                }
-            }
-        }
-    }
-}
-
-function Remove-ExistingNewTeams {
-    Write-Step 'Removing existing Microsoft Teams MSIX packages if found'
-
-    $existingPackages = Get-AppxPackage -AllUsers -Name 'MSTeams' -ErrorAction SilentlyContinue
-    foreach ($package in $existingPackages) {
-        Write-Step "Removing installed package: $($package.PackageFullName)"
-        try {
-            Remove-AppxPackage -Package $package.PackageFullName -AllUsers
-        } catch {
-            Write-WarningMessage "Failed to remove package $($package.PackageFullName). $_"
-        }
-    }
-
-    $provisioned = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq 'MSTeams' }
-    foreach ($entry in $provisioned) {
-        Write-Step "Removing provisioned package: $($entry.PackageName)"
-        try {
-            Remove-AppxProvisionedPackage -Online -PackageName $entry.PackageName | Out-Null
-        } catch {
-            Write-WarningMessage "Failed to remove provisioned package $($entry.PackageName). $_"
-        }
-    }
-}
-
-function Install-NewTeams {
-    param(
-        [Parameter(Mandatory)][string]$BootstrapperPath,
-        [switch]$Provision
-    )
-
-    if (-not (Test-Path -Path $BootstrapperPath)) {
-        throw "Teams bootstrapper not found at $BootstrapperPath"
-    }
-
-    $args = @()
-    if ($Provision) {
-        $args += '-p'
-    }
-
-    Write-Step "Installing Microsoft Teams via Teams bootstrapper"
-    $process = Start-Process -FilePath $BootstrapperPath -ArgumentList $args -Wait -PassThru -WindowStyle Hidden
+    Write-Step "Installing Teams (new) via bootstrapper"
+    $arguments = '-p'
+    $process = Start-Process -FilePath $BootstrapperPath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
     if ($process.ExitCode -ne 0) {
-        throw "Teams bootstrapper returned exit code $($process.ExitCode)"
+        throw "Teams bootstrapper exited with code $($process.ExitCode)."
     }
 }
 
 function Install-WebRtcRedirector {
-    param([Parameter(Mandatory)][string]$InstallerPath)
+    param([Parameter(Mandatory)][string]$MsiPath)
 
-    if (-not (Test-Path -Path $InstallerPath)) {
-        throw "WebRTC Redirector installer not found at $InstallerPath"
-    }
-
-    Write-Step "Installing Remote Desktop WebRTC Redirector Service from $InstallerPath"
-    $arguments = @('/i', "`"$InstallerPath`"", '/qn', '/norestart')
-    try {
-        Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -WindowStyle Hidden | Out-Null
-    } catch {
-        throw "Failed to install WebRTC Redirector Service. $_"
+    Write-Step 'Installing Remote Desktop WebRTC Redirector service'
+    $arguments = @('/i', "`"$MsiPath`"", '/qn', '/norestart')
+    $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+    if ($process.ExitCode -ne 0) {
+        throw "WebRTC Redirector MSI exited with code $($process.ExitCode)."
     }
 }
 
-function Ensure-WebRtcRedirector {
-    param(
-        [Parameter(Mandatory)][string]$InstallerUrl,
-        [Parameter(Mandatory)][string]$CacheDirectory,
-        [switch]$ForceDownload
-    )
+function Configure-TeamsForVDI {
+    Write-Step 'Configuring Teams VDI registry keys'
+    $teamsKey = 'HKLM:\SOFTWARE\Microsoft\Teams'
+    if (-not (Test-Path -Path $teamsKey)) {
+        New-Item -Path $teamsKey -Force | Out-Null
+    }
+
+    New-ItemProperty -Path $teamsKey -Name 'IsWVDEnvironment' -PropertyType DWord -Value 1 -Force | Out-Null
+    New-ItemProperty -Path $teamsKey -Name 'MediaRedirectionEnabled' -PropertyType DWord -Value 1 -Force | Out-Null
 
     $service = Get-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
-    if ($null -ne $service) {
-        Write-Step 'WebRTC Redirector Service already installed'
-        return
-    }
-
-    Write-Step 'WebRTC Redirector Service not detected. Installing.'
-    $installerPath = Get-DownloadTarget -Url $InstallerUrl -Directory $CacheDirectory -FallbackFileName 'MsRdcWebRTCSvc.msi'
-    Download-File -Url $InstallerUrl -Destination $installerPath -ForceDownload:$ForceDownload -EnsureBinary MSI
-    Install-WebRtcRedirector -InstallerPath $installerPath
-
-    $service = Get-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
-    if ($null -eq $service) {
-        Write-WarningMessage 'WebRTC Redirector Service installation completed but service was not detected. Validate manually.'
-    }
-}
-
-function Configure-TeamsVDI {
-    Write-Step 'Configuring Teams VDI optimization settings'
-
-    $teamsRegPath = 'HKLM:\SOFTWARE\Microsoft\Teams'
-    if (-not (Test-Path -Path $teamsRegPath)) {
-        New-Item -Path $teamsRegPath -Force | Out-Null
-    }
-
-    New-ItemProperty -Path $teamsRegPath -Name 'IsWVDEnvironment' -PropertyType DWord -Value 1 -Force | Out-Null
-    New-ItemProperty -Path $teamsRegPath -Name 'MediaRedirectionEnabled' -PropertyType DWord -Value 1 -Force | Out-Null
-
-    $serviceName = 'WebSocketService'
-    $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
     if ($null -ne $service) {
         if ($service.StartType -ne 'Automatic') {
-            Set-Service -Name $serviceName -StartupType Automatic
+            Set-Service -Name 'WebSocketService' -StartupType Automatic
         }
-
         if ($service.Status -ne 'Running') {
-            Start-Service -Name $serviceName -ErrorAction SilentlyContinue
+            Write-Step 'Starting WebSocketService'
+            Start-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
         }
     } else {
-        Write-WarningMessage 'AVD WebSocket redirection service not found. Confirm the Azure Virtual Desktop agent components are installed.'
+        Write-Warning 'WebSocketService not detected. Ensure the Azure Virtual Desktop agent components are installed.'
     }
-}
-
-if (-not (Test-IsAdministrator)) {
-    throw 'This script must be executed from an elevated PowerShell session.'
-}
-
-Write-Step 'Validating host platform'
-$osInfo = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-if (-not ($osInfo.ProductName -like '*Windows*') -or -not ($osInfo.ProductName -like '*Virtual*' -or $osInfo.ProductName -like '*Enterprise*')) {
-    Write-WarningMessage "Host reports ProductName '$($osInfo.ProductName)'. Ensure this VM is an Azure Virtual Desktop session host."
 }
 
 Ensure-Directory -Path $DownloadDirectory
 
-if (-not $SkipWebRtcRedirectorInstall) {
-    Ensure-WebRtcRedirector -InstallerUrl $WebRtcInstallerUrl -CacheDirectory $DownloadDirectory -ForceDownload:$Force
-} else {
-    Write-Step 'Skipping WebRTC Redirector Service installation as requested'
-}
+$bootstrapperPath = Get-DownloadTarget -Url $TeamsBootstrapperUrl -Directory $DownloadDirectory -FallbackName 'TeamsBootstrapper.exe'
+$bootstrapperPath = Download-Installer -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force
 
-$bootstrapperPath = Get-DownloadTarget -Url $TeamsBootstrapperUrl -Directory $DownloadDirectory -FallbackFileName 'TeamsBootstrapper.exe'
-Download-File -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force -EnsureBinary PE
+$webRtcPath = Get-DownloadTarget -Url $WebRtcInstallerUrl -Directory $DownloadDirectory -FallbackName 'MsRdcWebRTCSvc.msi'
+$webRtcPath = Download-Installer -Url $WebRtcInstallerUrl -Destination $webRtcPath -ForceDownload:$Force
 
-if (-not $SkipRemoveClassicTeams) {
-    Remove-ClassicTeams
-} else {
-    Write-Step 'Skipping legacy Teams removal as requested'
-}
+Install-TeamsBootstrapper -BootstrapperPath $bootstrapperPath
+Install-WebRtcRedirector -MsiPath $webRtcPath
+Configure-TeamsForVDI
 
-Remove-ExistingNewTeams
-
-Install-NewTeams -BootstrapperPath $bootstrapperPath -Provision:(-not $NoProvisioning)
-Configure-TeamsVDI
-
-Write-Step 'Microsoft Teams (new) installation and VDI configuration complete'
+Write-Step 'Teams installation and VDI configuration complete.'
