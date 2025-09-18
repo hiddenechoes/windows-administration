@@ -100,20 +100,6 @@ function Configure-TeamsForVDI {
     }
 
     New-ItemProperty -Path $teamsKey -Name 'IsWVDEnvironment' -PropertyType DWord -Value 1 -Force | Out-Null
-    New-ItemProperty -Path $teamsKey -Name 'MediaRedirectionEnabled' -PropertyType DWord -Value 1 -Force | Out-Null
-
-    $service = Get-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
-    if ($null -ne $service) {
-        if ($service.StartType -ne 'Automatic') {
-            Set-Service -Name 'WebSocketService' -StartupType Automatic
-        }
-        if ($service.Status -ne 'Running') {
-            Write-Step 'Starting WebSocketService'
-            Start-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
-        }
-    } else {
-        Write-Warning 'WebSocketService not detected. Ensure the Azure Virtual Desktop agent components are installed.'
-    }
 }
 
 Ensure-Directory -Path $DownloadDirectory
