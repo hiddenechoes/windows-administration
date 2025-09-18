@@ -92,11 +92,36 @@ function Install-Teams {
     }
 }
 
+function Configure-TeamsForVDI {
+    Write-Step 'Applying Teams VDI optimizations'
+    $teamsKey = 'HKLM:\SOFTWARE\Microsoft\Teams'
+    if (-not (Test-Path -Path $teamsKey)) {
+        New-Item -Path $teamsKey -Force | Out-Null
+    }
+
+    New-ItemProperty -Path $teamsKey -Name 'IsWVDEnvironment' -PropertyType DWord -Value 1 -Force | Out-Null
+    New-ItemProperty -Path $teamsKey -Name 'MediaRedirectionEnabled' -PropertyType DWord -Value 1 -Force | Out-Null
+
+    $service = Get-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
+    if ($null -ne $service) {
+        if ($service.StartType -ne 'Automatic') {
+            Set-Service -Name 'WebSocketService' -StartupType Automatic
+        }
+        if ($service.Status -ne 'Running') {
+            Write-Step 'Starting WebSocketService'
+            Start-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
+        }
+    } else {
+        Write-Warning 'WebSocketService not detected. Ensure the Azure Virtual Desktop agent components are installed.'
+    }
+}
+
 Ensure-Directory -Path $DownloadDirectory
 
 $bootstrapperPath = Get-BootstrapperPath -Url $TeamsBootstrapperUrl -Directory $DownloadDirectory
 $bootstrapperPath = Download-Bootstrapper -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force
 
 Install-Teams -BootstrapperPath $bootstrapperPath
+Configure-TeamsForVDI
 
-Write-Step 'Teams installation via bootstrapper complete.'
+Write-Step 'Teams installation and VDI optimization complete.'
