@@ -1,35 +1,19 @@
 <#
 .SYNOPSIS
-Installs Microsoft Teams (new) and the Azure Virtual Desktop WebRTC Redirector on a fresh Windows 11 session host image.
+Downloads and installs the Microsoft Teams (new) client using the Teams bootstrapper.
 
 .DESCRIPTION
-Downloads the Teams bootstrapper and the Remote Desktop WebRTC Redirector service, installs both, and applies the minimal registry configuration required for Teams media redirection on Azure Virtual Desktop. The script validates each download and retries the Teams bootstrapper from the CDN if the evergreen link delivers the wrong payload.
-
-.PARAMETER TeamsBootstrapperUrl
-Primary download link for the Teams bootstrapper executable (defaults to the evergreen URL).
-
-.PARAMETER WebRtcInstallerUrl
-Download link for the Remote Desktop WebRTC Redirector MSI.
-
-.PARAMETER DownloadDirectory
-Cache folder for the downloaded installers. Defaults to %ProgramData%\\Microsoft\\TeamsVDI.
-
-.PARAMETER Force
-Forces re-download of cached installers.
+Fetches the Teams bootstrapper executable from Microsoft's evergreen link and runs it with provisioning enabled so Teams is installed for all users on the host. Intended for use on Azure Virtual Desktop session hosts or other managed images.
 
 .EXAMPLE
 PS C:\> .\Install-Teams-VDI.ps1
-Downloads Teams and the WebRTC Redirector, installs both, and configures Teams for Azure Virtual Desktop.
+Downloads the Teams bootstrapper (if not already cached) and installs Teams (new).
 #>
 [CmdletBinding()]
 param(
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$TeamsBootstrapperUrl = 'https://go.microsoft.com/fwlink/?linkid=2248151',
-
-    [Parameter()]
-    [ValidateNotNullOrEmpty()]
-    [string]$WebRtcInstallerUrl = 'https://aka.ms/msrdcwebrtcsvc',
+    [string]$TeamsBootstrapperUrl = 'https://go.microsoft.com/fwlink/?linkid=2243204',
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
@@ -49,7 +33,7 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 } catch {
-    # TLS selection not available on down-level PowerShell.
+    # Ignore if TLS selection is unavailable.
 }
 
 function Write-Step {
@@ -65,160 +49,54 @@ function Ensure-Directory {
     }
 }
 
-function Get-DownloadTarget {
+function Get-BootstrapperPath {
     param(
         [Parameter(Mandatory)][string]$Url,
-        [Parameter(Mandatory)][string]$Directory,
-        [Parameter(Mandatory)][string]$FallbackName
+        [Parameter(Mandatory)][string]$Directory
     )
 
-    $uri = [System.Uri]::new($Url)
-    $fileName = [System.IO.Path]::GetFileName($uri.AbsolutePath)
+    $fileName = [System.IO.Path]::GetFileName([System.Uri]$Url)
     if ([string]::IsNullOrWhiteSpace($fileName) -or ($fileName -notmatch '\.')) {
-        $fileName = $FallbackName
+        $fileName = 'TeamsBootstrapper.exe'
     }
 
     return [System.IO.Path]::Combine($Directory, $fileName)
 }
 
-function Test-BinarySignature {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [ValidateSet('PE','MSI','AnyBinary')][string]$ExpectedType = 'AnyBinary'
-    )
-
-    if (-not (Test-Path -Path $Path)) {
-        return $false
-    }
-
-    try {
-        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-        try {
-            $buffer = New-Object byte[] 8
-            $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
-            if ($bytesRead -lt 4) {
-                return $false
-            }
-
-            $isPe = ($buffer[0] -eq 0x4D -and $buffer[1] -eq 0x5A)
-            $isMsi = ($buffer[0] -eq 0xD0 -and $buffer[1] -eq 0xCF -and $buffer[2] -eq 0x11 -and $buffer[3] -eq 0xE0)
-
-            switch ($ExpectedType) {
-                'PE' { return $isPe }
-                'MSI' { return $isMsi }
-                'AnyBinary' { return ($isPe -or $isMsi) }
-            }
-        } finally {
-            $stream.Dispose()
-        }
-    } catch {
-        return $false
-    }
-}
-
-function Download-Installer {
+function Download-Bootstrapper {
     param(
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$Destination,
-        [ValidateSet('None','PE','MSI','AnyBinary')][string]$EnsureBinary = 'None',
-        [switch]$ForceDownload,
-        [string]$FallbackUrl
+        [switch]$ForceDownload
     )
 
-    $userAgent = 'Mozilla/5.0 (Windows NT 10.0; TeamsVDI Installer)'
-
-    foreach ($candidateUrl in @($Url, $FallbackUrl) | Where-Object { $_ }) {
-        $useFallback = ($candidateUrl -ne $Url)
-
-        if (-not $useFallback -and (Test-Path -Path $Destination) -and -not $ForceDownload) {
-            if ($EnsureBinary -eq 'None' -or (Test-BinarySignature -Path $Destination -ExpectedType $EnsureBinary)) {
-                Write-Step "Using cached copy: $Destination"
-                return $Destination
-            }
-
-            Write-Step "Cached copy at $Destination failed validation. Re-downloading."
-            Remove-Item -Path $Destination -ErrorAction SilentlyContinue
-        }
-
-        if ($useFallback) {
-            Write-Step "Retrying download from CDN fallback: $candidateUrl"
-        } else {
-            Write-Step "Downloading from: $candidateUrl"
-        }
-
-        $headers = @{ 'User-Agent' = $userAgent }
-        Invoke-WebRequest -Uri $candidateUrl -Headers $headers -UseBasicParsing -OutFile $Destination
-
-        if ($EnsureBinary -eq 'None' -or (Test-BinarySignature -Path $Destination -ExpectedType $EnsureBinary)) {
-            return $Destination
-        }
-
-        Remove-Item -Path $Destination -ErrorAction SilentlyContinue
-
-        if ($useFallback) {
-            break
-        }
+    if ((Test-Path -Path $Destination) -and -not $ForceDownload) {
+        Write-Step "Using cached bootstrapper: $Destination"
+        return $Destination
     }
 
-    throw "Download from '$Url' (and fallback '$FallbackUrl') failed validation for expected type '$EnsureBinary'."
+    Write-Step "Downloading Teams bootstrapper from $Url"
+    $headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; TeamsBootstrapper Script)' }
+    Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -OutFile $Destination
+
+    return $Destination
 }
 
-function Install-TeamsBootstrapper {
+function Install-Teams {
     param([Parameter(Mandatory)][string]$BootstrapperPath)
 
-    Write-Step "Installing Teams (new) via bootstrapper"
-    $arguments = '-p'
-    $process = Start-Process -FilePath $BootstrapperPath -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+    Write-Step "Executing Teams bootstrapper"
+    $process = Start-Process -FilePath $BootstrapperPath -ArgumentList '-p' -Wait -PassThru -WindowStyle Hidden
     if ($process.ExitCode -ne 0) {
         throw "Teams bootstrapper exited with code $($process.ExitCode)."
     }
 }
 
-function Install-WebRtcRedirector {
-    param([Parameter(Mandatory)][string]$MsiPath)
-
-    Write-Step 'Installing Remote Desktop WebRTC Redirector service'
-    $arguments = @('/i', "`"$MsiPath`"", '/qn', '/norestart')
-    $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
-    if ($process.ExitCode -ne 0) {
-        throw "WebRTC Redirector MSI exited with code $($process.ExitCode)."
-    }
-}
-
-function Configure-TeamsForVDI {
-    Write-Step 'Configuring Teams VDI registry keys'
-    $teamsKey = 'HKLM:\SOFTWARE\Microsoft\Teams'
-    if (-not (Test-Path -Path $teamsKey)) {
-        New-Item -Path $teamsKey -Force | Out-Null
-    }
-
-    New-ItemProperty -Path $teamsKey -Name 'IsWVDEnvironment' -PropertyType DWord -Value 1 -Force | Out-Null
-    New-ItemProperty -Path $teamsKey -Name 'MediaRedirectionEnabled' -PropertyType DWord -Value 1 -Force | Out-Null
-
-    $service = Get-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
-    if ($null -ne $service) {
-        if ($service.StartType -ne 'Automatic') {
-            Set-Service -Name 'WebSocketService' -StartupType Automatic
-        }
-        if ($service.Status -ne 'Running') {
-            Write-Step 'Starting WebSocketService'
-            Start-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
-        }
-    } else {
-        Write-Warning 'WebSocketService not detected. Ensure the Azure Virtual Desktop agent components are installed.'
-    }
-}
-
 Ensure-Directory -Path $DownloadDirectory
 
-$bootstrapperPath = Get-DownloadTarget -Url $TeamsBootstrapperUrl -Directory $DownloadDirectory -FallbackName 'TeamsBootstrapper.exe'
-$bootstrapperPath = Download-Installer -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -EnsureBinary PE -ForceDownload:$Force -FallbackUrl 'https://statics.teams.cdn.office.net/production-windows-x64/teamsbootstrapper.exe'
+$bootstrapperPath = Get-BootstrapperPath -Url $TeamsBootstrapperUrl -Directory $DownloadDirectory
+$bootstrapperPath = Download-Bootstrapper -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force
 
-$webRtcPath = Get-DownloadTarget -Url $WebRtcInstallerUrl -Directory $DownloadDirectory -FallbackName 'MsRdcWebRTCSvc.msi'
-$webRtcPath = Download-Installer -Url $WebRtcInstallerUrl -Destination $webRtcPath -EnsureBinary MSI -ForceDownload:$Force
+Install-Teams -BootstrapperPath $bootstrapperPath
 
-Install-TeamsBootstrapper -BootstrapperPath $bootstrapperPath
-Install-WebRtcRedirector -MsiPath $webRtcPath
-Configure-TeamsForVDI
-
-Write-Step 'Teams installation and VDI configuration complete.'
+Write-Step 'Teams installation via bootstrapper complete.'
