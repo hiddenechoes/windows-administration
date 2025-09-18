@@ -136,7 +136,11 @@ function Remove-ClassicTeams {
             continue
         }
 
-        foreach ($entry in $entries | Where-Object { $_.DisplayName -eq 'Teams Machine-Wide Installer' }) {
+        foreach ($entry in $entries) {
+            $displayNameProperty = $entry.PSObject.Properties['DisplayName']
+            if ($null -eq $displayNameProperty -or $displayNameProperty.Value -ne 'Teams Machine-Wide Installer') {
+                continue
+            }
             $foundLegacy = $true
             $uninstallCmd = $entry.UninstallString
             if (-not $uninstallCmd) {
