@@ -63,6 +63,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+} catch {
+    # Ignore on platforms where ServicePointManager is not available
+}
+
 function Test-IsAdministrator {
     $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
@@ -77,6 +83,31 @@ function Write-Step {
 function Write-WarningMessage {
     param([Parameter(Mandatory)][string]$Message)
     Write-Warning $Message
+}
+
+function Test-MzExecutable {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -Path $Path)) {
+        return $false
+    }
+
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $buffer = New-Object byte[] 2
+            $bytesRead = $stream.Read($buffer, 0, 2)
+            if ($bytesRead -ne 2) {
+                return $false
+            }
+
+            return ($buffer[0] -eq 0x4D -and $buffer[1] -eq 0x5A)
+        } finally {
+            $stream.Dispose()
+        }
+    } catch {
+        return $false
+    }
 }
 
 function Ensure-Directory {
@@ -107,16 +138,32 @@ function Download-File {
     param(
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$Destination,
-        [switch]$ForceDownload
+        [switch]$ForceDownload,
+        [switch]$EnsureExecutable
     )
 
-    if ((Test-Path -Path $Destination) -and -not $ForceDownload) {
-        Write-Step "Using cached package: $Destination"
-        return
+    if (Test-Path -Path $Destination) {
+        if (-not $ForceDownload) {
+            if ($EnsureExecutable -and -not (Test-MzExecutable -Path $Destination)) {
+                Write-Step "Cached package at $Destination is invalid. Re-downloading."
+                Remove-Item -Path $Destination -ErrorAction SilentlyContinue
+            } else {
+                Write-Step "Using cached package: $Destination"
+                return
+            }
+        } else {
+            Remove-Item -Path $Destination -ErrorAction SilentlyContinue
+        }
     }
 
     Write-Step "Downloading from $Url"
-    Invoke-WebRequest -Uri $Url -UseBasicParsing -OutFile $Destination
+    $headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; TeamsVDI Installer)' }
+    Invoke-WebRequest -Uri $Url -UseBasicParsing -Headers $headers -OutFile $Destination
+
+    if ($EnsureExecutable -and -not (Test-MzExecutable -Path $Destination)) {
+        Remove-Item -Path $Destination -ErrorAction SilentlyContinue
+        throw "Downloaded file from $Url is not a valid Windows executable."
+    }
 }
 
 function Remove-ClassicTeams {
@@ -262,7 +309,7 @@ function Ensure-WebRtcRedirector {
 
     Write-Step 'WebRTC Redirector Service not detected. Installing.'
     $installerPath = Get-DownloadTarget -Url $InstallerUrl -Directory $CacheDirectory -FallbackFileName 'MsRdcWebRTCSvc.msi'
-    Download-File -Url $InstallerUrl -Destination $installerPath -ForceDownload:$ForceDownload
+    Download-File -Url $InstallerUrl -Destination $installerPath -ForceDownload:$ForceDownload -EnsureExecutable
     Install-WebRtcRedirector -InstallerPath $installerPath
 
     $service = Get-Service -Name 'WebSocketService' -ErrorAction SilentlyContinue
@@ -316,7 +363,7 @@ if (-not $SkipWebRtcRedirectorInstall) {
 }
 
 $bootstrapperPath = Get-DownloadTarget -Url $TeamsBootstrapperUrl -Directory $DownloadDirectory -FallbackFileName 'TeamsBootstrapper.exe'
-Download-File -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force
+Download-File -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force -EnsureExecutable
 
 if (-not $SkipRemoveClassicTeams) {
     Remove-ClassicTeams
