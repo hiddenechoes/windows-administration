@@ -3,19 +3,19 @@
 Installs Microsoft Teams (new) and the Azure Virtual Desktop WebRTC Redirector on a fresh Windows 11 session host image.
 
 .DESCRIPTION
-Downloads the Teams bootstrapper and the Remote Desktop WebRTC Redirector service, installs both, and applies the minimal registry configuration required for Teams media redirection on Azure Virtual Desktop.
+Downloads the Teams bootstrapper and the Remote Desktop WebRTC Redirector service, installs both, and applies the minimal registry configuration required for Teams media redirection on Azure Virtual Desktop. The script validates each download and retries the Teams bootstrapper from the CDN if the evergreen link delivers the wrong payload.
 
 .PARAMETER TeamsBootstrapperUrl
-Evergreen download link for the Teams bootstrapper executable.
+Primary download link for the Teams bootstrapper executable (defaults to the evergreen URL).
 
 .PARAMETER WebRtcInstallerUrl
-Evergreen download link for the Remote Desktop WebRTC Redirector MSI.
+Download link for the Remote Desktop WebRTC Redirector MSI.
 
 .PARAMETER DownloadDirectory
-Local cache folder for downloaded installers. Defaults to %ProgramData%\Microsoft\TeamsVDI.
+Cache folder for the downloaded installers. Defaults to %ProgramData%\\Microsoft\\TeamsVDI.
 
 .PARAMETER Force
-Forces re-download of the Teams bootstrapper and WebRTC Redirector installers.
+Forces re-download of cached installers.
 
 .EXAMPLE
 PS C:\> .\Install-Teams-VDI.ps1
@@ -49,7 +49,7 @@ if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
 } catch {
-    # TLS selection not available on down-level PowerShell - ignore.
+    # TLS selection not available on down-level PowerShell.
 }
 
 function Write-Step {
@@ -81,22 +81,86 @@ function Get-DownloadTarget {
     return [System.IO.Path]::Combine($Directory, $fileName)
 }
 
+function Test-BinarySignature {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateSet('PE','MSI','AnyBinary')][string]$ExpectedType = 'AnyBinary'
+    )
+
+    if (-not (Test-Path -Path $Path)) {
+        return $false
+    }
+
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try {
+            $buffer = New-Object byte[] 8
+            $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
+            if ($bytesRead -lt 4) {
+                return $false
+            }
+
+            $isPe = ($buffer[0] -eq 0x4D -and $buffer[1] -eq 0x5A)
+            $isMsi = ($buffer[0] -eq 0xD0 -and $buffer[1] -eq 0xCF -and $buffer[2] -eq 0x11 -and $buffer[3] -eq 0xE0)
+
+            switch ($ExpectedType) {
+                'PE' { return $isPe }
+                'MSI' { return $isMsi }
+                'AnyBinary' { return ($isPe -or $isMsi) }
+            }
+        } finally {
+            $stream.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
 function Download-Installer {
     param(
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$Destination,
-        [switch]$ForceDownload
+        [ValidateSet('None','PE','MSI','AnyBinary')][string]$EnsureBinary = 'None',
+        [switch]$ForceDownload,
+        [string]$FallbackUrl
     )
 
-    if ((Test-Path -Path $Destination) -and -not $ForceDownload) {
-        Write-Step "Using cached copy: $Destination"
-        return $Destination
+    $userAgent = 'Mozilla/5.0 (Windows NT 10.0; TeamsVDI Installer)'
+
+    foreach ($candidateUrl in @($Url, $FallbackUrl) | Where-Object { $_ }) {
+        $useFallback = ($candidateUrl -ne $Url)
+
+        if (-not $useFallback -and (Test-Path -Path $Destination) -and -not $ForceDownload) {
+            if ($EnsureBinary -eq 'None' -or (Test-BinarySignature -Path $Destination -ExpectedType $EnsureBinary)) {
+                Write-Step "Using cached copy: $Destination"
+                return $Destination
+            }
+
+            Write-Step "Cached copy at $Destination failed validation. Re-downloading."
+            Remove-Item -Path $Destination -ErrorAction SilentlyContinue
+        }
+
+        if ($useFallback) {
+            Write-Step "Retrying download from CDN fallback: $candidateUrl"
+        } else {
+            Write-Step "Downloading from: $candidateUrl"
+        }
+
+        $headers = @{ 'User-Agent' = $userAgent }
+        Invoke-WebRequest -Uri $candidateUrl -Headers $headers -UseBasicParsing -OutFile $Destination
+
+        if ($EnsureBinary -eq 'None' -or (Test-BinarySignature -Path $Destination -ExpectedType $EnsureBinary)) {
+            return $Destination
+        }
+
+        Remove-Item -Path $Destination -ErrorAction SilentlyContinue
+
+        if ($useFallback) {
+            break
+        }
     }
 
-    Write-Step "Downloading from: $Url"
-    $headers = @{ 'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; TeamsVDI Installer)' }
-    Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -OutFile $Destination
-    return $Destination
+    throw "Download from '$Url' (and fallback '$FallbackUrl') failed validation for expected type '$EnsureBinary'."
 }
 
 function Install-TeamsBootstrapper {
@@ -148,10 +212,10 @@ function Configure-TeamsForVDI {
 Ensure-Directory -Path $DownloadDirectory
 
 $bootstrapperPath = Get-DownloadTarget -Url $TeamsBootstrapperUrl -Directory $DownloadDirectory -FallbackName 'TeamsBootstrapper.exe'
-$bootstrapperPath = Download-Installer -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -ForceDownload:$Force
+$bootstrapperPath = Download-Installer -Url $TeamsBootstrapperUrl -Destination $bootstrapperPath -EnsureBinary PE -ForceDownload:$Force -FallbackUrl 'https://statics.teams.cdn.office.net/production-windows-x64/teamsbootstrapper.exe'
 
 $webRtcPath = Get-DownloadTarget -Url $WebRtcInstallerUrl -Directory $DownloadDirectory -FallbackName 'MsRdcWebRTCSvc.msi'
-$webRtcPath = Download-Installer -Url $WebRtcInstallerUrl -Destination $webRtcPath -ForceDownload:$Force
+$webRtcPath = Download-Installer -Url $WebRtcInstallerUrl -Destination $webRtcPath -EnsureBinary MSI -ForceDownload:$Force
 
 Install-TeamsBootstrapper -BootstrapperPath $bootstrapperPath
 Install-WebRtcRedirector -MsiPath $webRtcPath
