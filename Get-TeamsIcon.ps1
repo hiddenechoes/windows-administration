@@ -36,23 +36,14 @@ function Find-TeamsIconPath {
         return $null
     }
 
-    $preferredBases = @(
-        'TeamsForWorkNewAppList',
-        'TeamsForWorkAppList',
-        'TeamsAppList'
-    )
+    $badgeName = 'TeamsForWorkNewBadgeLogo'
+    $scaleValues = 400, 200, 150, 125, 100
 
-    $preferredSizes = 96, 80, 72, 64, 60, 48, 40, 36, 32, 30, 24, 20, 16
-
-    foreach ($baseName in $preferredBases) {
-        foreach ($size in $preferredSizes) {
-            foreach ($suffix in @('_altform-unplated', '')) {
-                $fileName = '{0}.targetsize-{1}{2}.png' -f $baseName, $size, $suffix
-                $fullPath = Join-Path -Path $imageRoot -ChildPath $fileName
-                if (Test-Path -LiteralPath $fullPath) {
-                    return (Resolve-Path -LiteralPath $fullPath).Path
-                }
-            }
+    foreach ($scale in $scaleValues) {
+        $fileName = '{0}.scale-{1}.png' -f $badgeName, $scale
+        $fullPath = Join-Path -Path $imageRoot -ChildPath $fileName
+        if (Test-Path -LiteralPath $fullPath) {
+            return (Resolve-Path -LiteralPath $fullPath).Path
         }
     }
 
