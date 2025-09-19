@@ -31,26 +31,34 @@ function Find-TeamsIconPath {
         [string]$InstallPath
     )
 
-    $candidateRelativePaths = @(
-        'Images\TeamsForWorkNewAppList.targetsize-256_altform-unplated.png',
-        'Images\TeamsForWorkNewAppList.targetsize-256.png',
-        'Images\TeamsForWorkAppList.targetsize-256_altform-unplated.png',
-        'Images\TeamsForWorkAppList.targetsize-256.png',
-        'Images\TeamsAppList.targetsize-256_altform-unplated.png',
-        'Images\TeamsAppList.targetsize-256.png',
-        'Assets\TeamsForWorkIcon.targetsize-256_altform-unplated.png',
-        'Assets\TeamsForWorkIcon.targetsize-256.png'
+    $imageRoot = Join-Path -Path $InstallPath -ChildPath 'Images'
+    if (-not (Test-Path -LiteralPath $imageRoot)) {
+        return $null
+    }
+
+    $preferredBases = @(
+        'TeamsForWorkNewAppList',
+        'TeamsForWorkAppList',
+        'TeamsAppList'
     )
 
-    foreach ($relativePath in $candidateRelativePaths) {
-        $fullPath = Join-Path -Path $InstallPath -ChildPath $relativePath
-        if (Test-Path -LiteralPath $fullPath) {
-            return (Resolve-Path -LiteralPath $fullPath).Path
+    $preferredSizes = 96, 80, 72, 64, 60, 48, 40, 36, 32, 30, 24, 20, 16
+
+    foreach ($baseName in $preferredBases) {
+        foreach ($size in $preferredSizes) {
+            foreach ($suffix in @('_altform-unplated', '')) {
+                $fileName = '{0}.targetsize-{1}{2}.png' -f $baseName, $size, $suffix
+                $fullPath = Join-Path -Path $imageRoot -ChildPath $fileName
+                if (Test-Path -LiteralPath $fullPath) {
+                    return (Resolve-Path -LiteralPath $fullPath).Path
+                }
+            }
         }
     }
 
-    # Fallback: look for any 256px icon that matches typical naming
-    $fallbackIcon = Get-ChildItem -Path $InstallPath -Recurse -Filter '*targetsize-256*_unplated.png' -ErrorAction SilentlyContinue |
+    # Fallback: choose the largest Teams PNG in the Images directory
+    $fallbackIcon = Get-ChildItem -Path $imageRoot -Filter '*.png' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match 'Teams' } |
         Sort-Object -Property Length -Descending |
         Select-Object -First 1
 
