@@ -4,14 +4,15 @@ param(
     [string]$DestinationDirectory = "$env:ProgramData\RemoteAppIcons",
 
     [Parameter(HelpMessage = "File name to use for the copied icon.")]
-    [string]$OutputFileName = "MicrosoftTeams.png",
-
-    [Parameter(HelpMessage = "Return the FileInfo object for the copied icon.")]
-    [switch]$PassThru
+    [string]$OutputFileName = "MicrosoftTeams.png"
 )
+
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
+    throw 'Run this script in an elevated PowerShell session (Run as Administrator).'}
 
 function Get-TeamsMsixPackage {
     [CmdletBinding()] param()
@@ -94,8 +95,4 @@ Copy-Item -LiteralPath $iconPath -Destination $destinationPath -Force
 
 Write-Verbose ("Copied Teams icon to '{0}'." -f $destinationPath)
 
-if ($PassThru) {
-    Get-Item -LiteralPath $destinationPath
-} else {
-    Write-Output $destinationPath
-}
+Write-Output $destinationPath
