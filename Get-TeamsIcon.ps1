@@ -36,7 +36,7 @@ function Find-TeamsIconPath {
         return $null
     }
 
-    $badgeName = 'TeamsForWorkNewBadgeLogo'
+    $badgeName = 'TeamsForWorkNewStoreLogo'
     $scaleValues = 400, 200, 150, 125, 100
 
     foreach ($scale in $scaleValues) {
