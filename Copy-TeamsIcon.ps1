@@ -8,14 +8,14 @@
     Requires running in an elevated PowerShell session.
 
 .PARAMETER DestinationDirectory
-    The directory where the icon PNG will be copied. Defaults to $env:ProgramData\RemoteAppIcons.
+    The directory where the icon PNG will be copied. Defaults to C:\ProgramData\RemoteAppIcons.
 
 .PARAMETER OutputFileName
     File name to use for the exported PNG. Defaults to MicrosoftTeams.png.
 
 .EXAMPLE
     .\Get-TeamsIcon.ps1
-    Copies the Teams icon to $env:ProgramData\RemoteAppIcons\MicrosoftTeams.png and outputs the path.
+    Copies the Teams icon to C:\ProgramData\RemoteAppIcons\MicrosoftTeams.png and outputs the path.
 
 .EXAMPLE
     .\Get-TeamsIcon.ps1 -DestinationDirectory 'C:\RemoteApps\Icons' -OutputFileName 'Teams.png'
@@ -30,7 +30,7 @@
 [CmdletBinding()]
 param(
     [Parameter(HelpMessage = "Directory to copy the Teams icon into.")]
-    [string]$DestinationDirectory = "$env:ProgramData\RemoteAppIcons",
+    [string]$DestinationDirectory = "C:\ProgramData\RemoteAppIcons",
 
     [Parameter(HelpMessage = "File name to use for the copied icon.")]
     [string]$OutputFileName = "MicrosoftTeams.png"
