@@ -1,3 +1,32 @@
+<#
+.SYNOPSIS
+    Extracts the Microsoft Teams (New) logo from the MSIX install for use with RemoteApp icons.
+
+.DESCRIPTION
+    Finds the all-users MSTeams Store package, resolves the highest available TeamsForWorkNewStoreLogo PNG,
+    and copies it to a shared destination so RemoteApp or other tooling can reference it.
+    Requires running in an elevated PowerShell session.
+
+.PARAMETER DestinationDirectory
+    The directory where the icon PNG will be copied. Defaults to $env:ProgramData\RemoteAppIcons.
+
+.PARAMETER OutputFileName
+    File name to use for the exported PNG. Defaults to MicrosoftTeams.png.
+
+.EXAMPLE
+    .\Get-TeamsIcon.ps1
+    Copies the Teams icon to $env:ProgramData\RemoteAppIcons\MicrosoftTeams.png and outputs the path.
+
+.EXAMPLE
+    .\Get-TeamsIcon.ps1 -DestinationDirectory 'C:\RemoteApps\Icons' -OutputFileName 'Teams.png'
+    Copies the icon into C:\RemoteApps\Icons\Teams.png and outputs the path.
+
+.NOTES
+    Author: Corwin Robins
+    Running as administrator is required to enumerate MSTeams for all users and write under ProgramData.
+#>
+
+# Extract the Microsoft Teams icon from the New Teams MSIX so RemoteApp can use it.
 [CmdletBinding()]
 param(
     [Parameter(HelpMessage = "Directory to copy the Teams icon into.")]
@@ -7,19 +36,22 @@ param(
     [string]$OutputFileName = "MicrosoftTeams.png"
 )
 
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Require elevation since we enumerate all-user packages and write under ProgramData.
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)) {
-    throw 'Run this script in an elevated PowerShell session (Run as Administrator).'}
+    throw 'Run this script in an elevated PowerShell session (Run as Administrator).'
+}
 
 function Get-TeamsMsixPackage {
     [CmdletBinding()] param()
 
     try {
+        # Query the Store-based New Teams package that installs for all users.
         return Get-AppxPackage -Name 'MSTeams' -AllUsers -ErrorAction Stop | Select-Object -First 1
-    } catch {
+    }
+    catch {
         Write-Verbose 'Get-AppxPackage -AllUsers did not find MSTeams.'
         return $null
     }
@@ -41,6 +73,7 @@ function Find-TeamsIconPath {
     $scaleValues = 400, 200, 150, 125, 100
 
     foreach ($scale in $scaleValues) {
+        # Prefer the highest scale badge logo for the sharpest image.
         $fileName = '{0}.scale-{1}.png' -f $badgeName, $scale
         $fullPath = Join-Path -Path $imageRoot -ChildPath $fileName
         if (Test-Path -LiteralPath $fullPath) {
@@ -48,7 +81,7 @@ function Find-TeamsIconPath {
         }
     }
 
-    # Fallback: choose the largest Teams PNG in the Images directory
+    # Fall back to any Teams PNG, favoring larger files.
     $fallbackIcon = Get-ChildItem -Path $imageRoot -Filter '*.png' -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match 'Teams' } |
         Sort-Object -Property Length -Descending |
@@ -84,6 +117,7 @@ if (-not $iconPath) {
 
 Write-Verbose ("Teams icon located at '{0}'." -f $iconPath)
 
+# Ensure the destination folder exists before placing the icon.
 if (-not (Test-Path -LiteralPath $DestinationDirectory)) {
     Write-Verbose ("Creating destination directory '{0}'." -f $DestinationDirectory)
     New-Item -Path $DestinationDirectory -ItemType Directory -Force | Out-Null
@@ -91,8 +125,10 @@ if (-not (Test-Path -LiteralPath $DestinationDirectory)) {
 
 $destinationPath = Join-Path -Path $DestinationDirectory -ChildPath $OutputFileName
 
+# Copy the PNG and report where it landed.
 Copy-Item -LiteralPath $iconPath -Destination $destinationPath -Force
 
 Write-Verbose ("Copied Teams icon to '{0}'." -f $destinationPath)
 
 Write-Output $destinationPath
+
